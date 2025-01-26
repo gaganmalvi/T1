@@ -1,23 +1,34 @@
 // T1 by Kailash (kaliash@ampere.works), Amit (amit@absurd.industries) and Amartha (amartha@absurd.industries)
 // Based off of GxEPD2_HelloWorld.ino by Jean-Marc Zingg
-//
-//
-//
 
 #include <ESP32Time.h>
 #include <WiFi.h>
 #include <GxEPD2_BW.h>
-#include "w3_ip28pt7b.h" // https://www.dafont.com/w3usdip.font?text=01%3A07+Friday+15th+August&back=theme
-#include <Fonts/FreeMonoBold12pt7b.h> // More fonts; https://github.com/adafruit/Adafruit-GFX-Library/tree/master/Fonts
-#include "w3_ip18pt7b.h" 
-#include "w3_ip14pt7b.h" 
+#include <HTTPClient.h>
 #include <Preferences.h> // https://github.com/espressif/arduino-esp32/blob/master/libraries/Preferences/src/Preferences.h
 
-#define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
-#define TIME_TO_SLEEP 60          /* Time ESP32 will go to sleep (in seconds) */
+// Fonts
+#include "resources/fonts/Outfit_28pt7b.h"
+#include "resources/fonts/Outfit_14pt7b.h"
+#include "resources/fonts/Outfit_10pt7b.h"
 
-String ssid;      
+// Icons
+#include "resources/icons/all.h"
+
+#define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP 55          /* Time ESP32 will go to sleep (in seconds) */
+
+String ssid;
 String password;
+
+// Weather
+WiFiClient client;
+HTTPClient http;
+
+// Interval for weather updates (24 hours in milliseconds)
+const unsigned long updateInterval = 24 * 60 * 60 * 1000;
+
+const char* weatherUrl = "https://wttr.in/Bengaluru?format=%t";
 
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 3600 * 5.5;
@@ -42,6 +53,40 @@ void print_wakeup_reason() {
     case ESP_SLEEP_WAKEUP_ULP: Serial.println("Wakeup caused by ULP program"); break;
     default: Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason); break;
   }
+}
+
+void getWeatherData() {
+  unsigned long currentTime = millis();
+  preferences.begin("t1", false);
+  unsigned long lastUpdateTime = preferences.getULong("lastUpdateTime");
+  // Check if it's time to update the weather
+  if (currentTime - lastUpdateTime >= updateInterval || lastUpdateTime == 0) {
+    Serial.println("[WEATHER] Check init");
+    // Fetch and print the weather
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      http.begin(weatherUrl); // Initialize HTTP request
+      int httpResponseCode = http.GET();
+
+      if (httpResponseCode == 200) { // HTTP OK
+        String weather = http.getString();
+        Serial.println("Success update weather");
+        preferences.putULong("lastUpdateTime", currentTime);
+        preferences.putString("weather", weather);
+      } else {
+        Serial.print("Error fetching weather: ");
+        Serial.println(httpResponseCode);
+      }
+      http.end(); // Close connection
+
+    } else {
+      Serial.println("Wi-Fi disconnected. Reconnecting...");
+      WiFi.begin(ssid, password);
+    }
+  } else {
+    Serial.println("[WEATHER] Need to wait 24h");
+  }
+  preferences.end();
 }
 
 void storeWiFiCredentials(const char* ssid, const char* password) {
@@ -89,24 +134,27 @@ void getTimeOverInternet() {
 void connectToWiFi() {
   retrieveWiFiCredentials(); // Fetch stored credentials
   WiFi.mode(WIFI_STA);
-  WiFi.begin("Amit", "helloamit");
+  Serial.println("[WIFI] SETUP");
+  WiFi.begin("SSID", "PWD");
   while (WiFi.status() != WL_CONNECTED) {
     delay(100);
   }
 }
 
 void factoryReset() {
-  storeWiFiCredentials("Amit", "helloamit");
+  storeWiFiCredentials("SSID", "PWD");
   preferences.begin("t1", false);
   preferences.putULong("epoch", 0);
   preferences.putULong("updateOn", 3600);
+  preferences.putULong("lastUpdateTime", 0);
   preferences.end();
-  
 }
 
 void setup() {
   // Basic initialization
   Serial.begin(115200);
+
+  Serial.println("[INIT] Initialize watch");
   print_wakeup_reason();
   esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
   factoryReset();
@@ -116,7 +164,10 @@ void setup() {
   unsigned long updateOn = preferences.getULong("updateOn", 0);
 
   if (epoch == 0 || epoch > updateOn) {
+    Serial.println("[INIT] Connect to WiFi");
     connectToWiFi();
+    Serial.println("[INIT] Get Time");
+    getWeatherData();
     getTimeOverInternet();
     WiFi.disconnect();
   }
@@ -124,37 +175,56 @@ void setup() {
   retrieveTime();  
 }
 
+void printLeftString(String buf, int x, int y) {
+  display.setCursor(x, y);
+  display.print(buf);
+}
+
+void printRightString(String buf, int x, int y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buf, x, y, &x1, &y1, &w, &h);
+  display.setCursor(x - w, y);
+  display.print(buf);
+}
+
+void printCenterString(String buf, int x, int y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buf, x, y, &x1, &y1, &w, &h);
+  display.setCursor(x - w / 2, y);
+  display.print(buf);
+}
+
 void displayTime() {
   // retrieveTime();
+  preferences.begin("t1", true);
+  String weather = preferences.getString("weather", "+OOC");
+  Serial.println(weather);
+  preferences.end();
+  // Print UI
   display.setRotation(0);
-  display.setFont(&w3_ip28pt7b);
   display.setTextColor(GxEPD_BLACK);
-  int16_t tbx, tby;
-  uint16_t tbw, tbh;
-  // center the bounding box by transposition of the origin:
-  uint16_t x = ((display.width() - tbw) / 2) - tbx;
-  uint16_t y = ((display.height() - tbh) / 2) - tby;
   display.setFullWindow();
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
-    display.setCursor(7, y - 40);
-    display.println(rtc.getTime("%R")); // 22:23
-    
-    display.setFont(&w3_ip18pt7b);
-    display.setCursor(0, y - 13);
-    display.println("---------"); // 22:23
-    display.setCursor(7, y + 14);
-    display.println(rtc.getTime("%A"));    // Wednesday 
-    
-    display.setFont(&w3_ip14pt7b);
-    display.setCursor(7, y + 60);
-    display.println(rtc.getTime("%d"));    // 14 
-    display.setCursor(7, y + 88);
-    display.println(rtc.getTime("%b %Y"));  // Sep 
 
-    // display.setCursor(56, 30);
-    // display.println(rtc.getTime(""));   
+    display.setFont(&Outfit_ExtraBold28pt7b);
+    printCenterString(rtc.getTime("%R"), 117, 125);
+
+    display.setFont(&Outfit_SemiBold14pt7b);
+    printCenterString(rtc.getTime("%A"), 100, 30);    // Wednesday 
+    
+    display.setFont(&Outfit_SemiBold10pt7b);
+    printCenterString(rtc.getTime("%d %b, %Y"), 140, 60);    // 12
+
+    display.setFont(&Outfit_SemiBold10pt7b);
+    String jtagConnected = usb_serial_jtag_is_connected() ? "Debug Mode" : "";
+    printCenterString(jtagConnected, 140, 155);    // 12
+
+    display.drawBitmap(40, 170, icon_weather_small, 28, 28, GxEPD_BLACK);
+    printCenterString(weather, 130, 190);
   } while (display.nextPage());
 }
 
@@ -162,5 +232,11 @@ void loop() {
     display.init(115200, true, 2, false);
     displayTime();
     display.hibernate();
-    esp_deep_sleep_start();
+    if (!usb_serial_jtag_is_connected()) {
+      Serial.println("[DS] USB not plugged in, go to deep sleep");
+      esp_deep_sleep_start();
+    } else {
+      Serial.println("[JTAG] JTAG connected, not deep sleep");
+      delay(TIME_TO_SLEEP * 1000); // Simulate deepsleep. Helps us for debugging in case we solder it off. 
+    }
 }
